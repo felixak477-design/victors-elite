@@ -12,7 +12,8 @@ import {
   orderBy,
   query,
   serverTimestamp,
-  setDoc
+  setDoc,
+  getDoc
 } from "firebase/firestore";
 
 type Profile = {
@@ -41,52 +42,68 @@ type Notice = {
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+
   const [posts, setPosts] = useState<Post[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
+
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
+
   const [form, setForm] = useState({
     name: "",
     email: "",
     password: ""
   });
+
   const [post, setPost] = useState({
     title: "",
     body: ""
   });
+
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => onAuthStateChanged(auth, async (current) => {
-    setUser(current);
-
-    if (!current) {
-      setProfile(null);
-      return;
-    }
-
-    try {
-      const token = await current.getIdTokenResult(true);
-      const { getDoc } = await import("firebase/firestore");
-      const snap = await getDoc(doc(db, "users", current.uid));
-
-      if (snap.exists()) {
-        setProfile({
-          ...snap.data(),
-          role: token.claims.admin === true ? "admin" : "member"
-        } as Profile);
-      } else {
-        setProfile(null);
-      }
-    } catch {
-      setProfile(null);
-    }
-  }), []);
-
+  // AUTHENTICATION AND MEMBERSHIP STATUS
   useEffect(() => {
-    const admin = profile?.role === "admin";
-    const approved = profile?.status === "approved";
+    return onAuthStateChanged(auth, async (current) => {
+      setAuthReady(false);
+      setUser(current);
 
-    if (!user || (!approved && !admin)) {
+      if (!current) {
+        setProfile(null);
+        setPosts([]);
+        setNotices([]);
+        setAuthReady(true);
+        return;
+      }
+
+      try {
+        const token = await current.getIdTokenResult(true);
+        const snap = await getDoc(doc(db, "users", current.uid));
+
+        if (snap.exists()) {
+          setProfile({
+            ...snap.data(),
+            role: token.claims.admin === true ? "admin" : "member"
+          } as Profile);
+        } else {
+          setProfile(null);
+        }
+      } catch {
+        setProfile(null);
+      } finally {
+        setAuthReady(true);
+      }
+    });
+  }, []);
+
+  const approved = profile?.status === "approved";
+  const admin = profile?.role === "admin";
+  const canViewPrivateContent = approved || admin;
+
+  // LOAD POSTS ONLY FOR APPROVED MEMBERS AND ADMINS
+  useEffect(() => {
+    if (!authReady || !user || !canViewPrivateContent) {
       setPosts([]);
       return;
     }
@@ -106,9 +123,15 @@ export default function Home() {
       ),
       () => setPosts([])
     );
-  }, [user, profile?.status, profile?.role]);
+  }, [user, authReady, canViewPrivateContent]);
 
+  // LOAD ANNOUNCEMENTS ONLY FOR APPROVED MEMBERS AND ADMINS
   useEffect(() => {
+    if (!authReady || !user || !canViewPrivateContent) {
+      setNotices([]);
+      return;
+    }
+
     const q = query(
       collection(db, "notices"),
       orderBy("createdAt", "desc")
@@ -121,10 +144,12 @@ export default function Home() {
           id: d.id,
           ...d.data()
         } as Notice))
-      )
+      ),
+      () => setNotices([])
     );
-  }, []);
+  }, [user, authReady, canViewPrivateContent]);
 
+  // REGISTER OR SIGN IN
   async function submitAuth(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
@@ -182,7 +207,7 @@ export default function Home() {
           form.password
         );
 
-        setMessage("Signed in. Loading your member status…");
+        setMessage("Signed in. Loading your membership status…");
       }
     } catch (err) {
       setMessage(
@@ -193,13 +218,11 @@ export default function Home() {
     }
   }
 
+  // PUBLISH A COMMUNITY POST
   async function publishPost(e: React.FormEvent) {
     e.preventDefault();
 
-    const approved = profile?.status === "approved";
-    const admin = profile?.role === "admin";
-
-    if (!user || (!approved && !admin)) {
+    if (!user || !canViewPrivateContent) {
       setMessage("You do not have permission to publish.");
       return;
     }
@@ -212,7 +235,7 @@ export default function Home() {
         title: post.title.trim(),
         body: post.body.trim(),
         authorUid: user.uid,
-        authorName: profile.displayName,
+        authorName: profile?.displayName || "Member",
         createdAt: serverTimestamp()
       });
 
@@ -233,9 +256,6 @@ export default function Home() {
     }
   }
 
-  const approved = profile?.status === "approved";
-  const admin = profile?.role === "admin";
-
   return (
     <main>
       <header className="topbar">
@@ -248,9 +268,15 @@ export default function Home() {
         </a>
 
         <nav>
-          <a href="#features">What we do</a>
-          <a href="#community">Community</a>
+          {canViewPrivateContent && (
+            <>
+              <a href="#features">What we do</a>
+              <a href="#community">Community</a>
+            </>
+          )}
+
           {admin && <a href="/admin">Admin</a>}
+
           {user ? (
             <button
               className="smallButton"
@@ -259,11 +285,14 @@ export default function Home() {
               Sign out
             </button>
           ) : (
-            <a className="navJoin" href="#account">Join us</a>
+            <a className="navJoin" href="#account">
+              Join us
+            </a>
           )}
         </nav>
       </header>
 
+      {/* PUBLIC LANDING PAGE */}
       <section className="hero">
         <div className="eyebrow">
           ONE COMMUNITY. ENDLESS POSSIBILITIES.
@@ -285,9 +314,12 @@ export default function Home() {
           <a className="primaryButton" href="#account">
             Become a member ↗
           </a>
-          <a className="outlineButton" href="#features">
-            Explore the community
-          </a>
+
+          {canViewPrivateContent && (
+            <a className="outlineButton" href="#features">
+              Explore the community
+            </a>
+          )}
         </div>
 
         <div className="motto">
@@ -297,63 +329,54 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="section" id="features">
-        <div className="sectionHead">
-          <div>
-            <div className="eyebrow">BUILT FOR PROGRESS</div>
-            <h2>Everything in one place.</h2>
+      {/* PRIVATE FEATURES */}
+      {canViewPrivateContent && (
+        <section className="section" id="features">
+          <div className="sectionHead">
+            <div>
+              <div className="eyebrow">BUILT FOR PROGRESS</div>
+              <h2>Everything in one place.</h2>
+            </div>
+
+            <p>
+              A practical space to stay informed, exchange ideas
+              and keep the community moving forward.
+            </p>
           </div>
-          <p>
-            A practical space to stay informed, exchange ideas
-            and keep the community moving forward.
-          </p>
-        </div>
 
-        <div className="featureGrid">
-          {[
-            ["✦", "Community discussions", "Share ideas, ask questions and learn from other members."],
-            ["▤", "Homework & revision", "Exchange homework, notes and useful learning resources."],
-            ["◷", "Exam reminders", "Keep important dates, deadlines and exam reminders in view."],
-            ["◎", "Daily activities", "Join community tasks, challenges and activities."],
-            ["↗", "Opportunities", "Share opportunities and information that help members grow."],
-            ["♧", "Teamwork & unity", "Build a supportive culture of collaboration and progress."]
-          ].map(([icon, title, desc]) => (
-            <article className="feature" key={title}>
-              <span>{icon}</span>
-              <h3>{title}</h3>
-              <p>{desc}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="section community" id="community">
-        <div className="sectionHead">
-          <div>
-            <div className="eyebrow">THE MEMBERS' SPACE</div>
-            <h2>Community board.</h2>
+          <div className="featureGrid">
+            {[
+              ["✦", "Community discussions", "Share ideas, ask questions and learn from other members."],
+              ["▤", "Homework & revision", "Exchange homework, notes and useful learning resources."],
+              ["◷", "Exam reminders", "Keep important dates, deadlines and exam reminders in view."],
+              ["◎", "Daily activities", "Join community tasks, challenges and activities."],
+              ["↗", "Opportunities", "Share opportunities and information that help members grow."],
+              ["♧", "Teamwork & unity", "Build a supportive culture of collaboration and progress."]
+            ].map(([icon, title, desc]) => (
+              <article className="feature" key={title}>
+                <span>{icon}</span>
+                <h3>{title}</h3>
+                <p>{desc}</p>
+              </article>
+            ))}
           </div>
-          <p>
-            Sign in with an approved account or administrator
-            access to participate.
-          </p>
-        </div>
+        </section>
+      )}
 
-        {user && profile?.status === "pending" && !admin && (
-          <div className="notice">
-            Your registration is awaiting approval. You can
-            access member features once an administrator approves it.
+      {/* PRIVATE COMMUNITY */}
+      {canViewPrivateContent && (
+        <section className="section community" id="community">
+          <div className="sectionHead">
+            <div>
+              <div className="eyebrow">THE MEMBERS' SPACE</div>
+              <h2>Community board.</h2>
+            </div>
+
+            <p>
+              Welcome to the private THE VICTORS community.
+            </p>
           </div>
-        )}
 
-        {user && profile?.status === "declined" && !admin && (
-          <div className="notice warning">
-            Your registration was not approved. Contact a
-            community administrator for help.
-          </div>
-        )}
-
-        {(approved || admin) && (
           <form
             className="panel postForm"
             onSubmit={publishPost}
@@ -387,55 +410,59 @@ export default function Home() {
               {busy ? "Publishing…" : "Publish post"}
             </button>
           </form>
-        )}
 
-        <div className="postList">
-          {posts.map(item => (
-            <article className="panel post" key={item.id}>
-              <div className="postMeta">
-                {item.authorName || "Member"} ·{" "}
-                {item.createdAt?.toDate?.().toLocaleString() || "Just now"}
+          <div className="postList">
+            {posts.map(item => (
+              <article className="panel post" key={item.id}>
+                <div className="postMeta">
+                  {item.authorName || "Member"} ·{" "}
+                  {item.createdAt?.toDate?.().toLocaleString() || "Just now"}
+                </div>
+
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </article>
+            ))}
+
+            {posts.length === 0 && (
+              <div className="panel muted">
+                No posts yet. Be the first to start a useful discussion.
               </div>
-              <h3>{item.title}</h3>
-              <p>{item.body}</p>
-            </article>
-          ))}
-
-          {posts.length === 0 && (
-            <div className="panel muted">
-              No posts yet. Be the first to start a useful discussion.
-            </div>
-          )}
-        </div>
-
-        <div className="sectionHead noticeHead">
-          <div>
-            <div className="eyebrow">KEEP UP TO DATE</div>
-            <h2>Announcements & activities.</h2>
+            )}
           </div>
-        </div>
 
-        <div className="noticeGrid">
-          {notices.map(n => (
-            <article className="panel" key={n.id}>
-              <span className="tag">
-                {n.type || "ANNOUNCEMENT"}
-              </span>
-              <h3>{n.title}</h3>
-              <p>{n.body}</p>
-              {n.date && <small>{n.date}</small>}
-            </article>
-          ))}
-
-          {notices.length === 0 && (
-            <div className="panel muted">
-              New announcements, exam reminders and activities
-              will appear here.
+          <div className="sectionHead noticeHead">
+            <div>
+              <div className="eyebrow">KEEP UP TO DATE</div>
+              <h2>Announcements & activities.</h2>
             </div>
-          )}
-        </div>
-      </section>
+          </div>
 
+          <div className="noticeGrid">
+            {notices.map(n => (
+              <article className="panel" key={n.id}>
+                <span className="tag">
+                  {n.type || "ANNOUNCEMENT"}
+                </span>
+
+                <h3>{n.title}</h3>
+                <p>{n.body}</p>
+
+                {n.date && <small>{n.date}</small>}
+              </article>
+            ))}
+
+            {notices.length === 0 && (
+              <div className="panel muted">
+                New announcements, exam reminders and activities
+                will appear here.
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* ACCOUNT AND MEMBERSHIP */}
       <section className="section account" id="account">
         <div className="accountCard">
           <div className="eyebrow">
@@ -448,14 +475,20 @@ export default function Home() {
               : "Your next chapter starts here."}
           </h2>
 
-          {user ? (
+          {!authReady && user ? (
+            <p>Checking your membership status…</p>
+          ) : user ? (
             <>
               <p>
                 {admin
                   ? "You have administrator access. Welcome to THE VICTORS."
                   : approved
                     ? "Your membership is active. Take part in the community."
-                    : "Your account is created. Membership access depends on administrator approval."}
+                    : profile?.status === "declined"
+                      ? "Your registration was not approved. Contact a community administrator for help."
+                      : profile?.status === "pending"
+                        ? "Your registration is awaiting approval. Private member services will become available after approval."
+                        : "Your membership status could not be verified. Please contact an administrator."}
               </p>
 
               {admin && (
@@ -468,6 +501,7 @@ export default function Home() {
             <>
               <div className="tabs">
                 <button
+                  type="button"
                   className={authMode === "register" ? "selected" : ""}
                   onClick={() => setAuthMode("register")}
                 >
@@ -475,6 +509,7 @@ export default function Home() {
                 </button>
 
                 <button
+                  type="button"
                   className={authMode === "login" ? "selected" : ""}
                   onClick={() => setAuthMode("login")}
                 >
@@ -546,9 +581,11 @@ export default function Home() {
 
       <footer>
         <b>THE VICTORS</b>
+
         <span>
           Knowledge is Power. Unity is Strength. Success is Our Mission.
         </span>
+
         <span>© {new Date().getFullYear()} THE VICTORS</span>
       </footer>
     </main>

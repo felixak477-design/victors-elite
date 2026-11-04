@@ -68,7 +68,7 @@ service cloud.firestore {
     }
 
     match /notices/{noticeId} {
-      allow read: if true;
+      allow read: if isApproved() || isAdmin();
       allow create, update, delete: if isAdmin();
     }
   }

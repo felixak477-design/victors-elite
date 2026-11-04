@@ -1,25 +1,43 @@
+
 import admin from "firebase-admin";
-import readline from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
 
-const rl = readline.createInterface({ input, output });
-const email = await rl.question("Email address of the existing Firebase user to make admin: ");
-rl.close();
+const projectId = process.env.FIREBASE_PROJECT_ID;
+const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+const ownerEmail = process.env.OWNER_EMAIL?.trim().toLowerCase();
 
-if (!process.env.FIREBASE_PROJECT_ID || !process.env.FIREBASE_CLIENT_EMAIL || !process.env.FIREBASE_PRIVATE_KEY) {
-  throw new Error("Set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY first.");
+if (!projectId || !clientEmail || !privateKey || !ownerEmail) {
+  throw new Error("Required GitHub secrets are missing.");
 }
-if (!email.includes("@")) throw new Error("Enter a valid email address.");
+
+if (projectId !== "thevictors") {
+  throw new Error("Wrong Firebase project. Expected thevictors.");
+}
+
+if (ownerEmail !== "felixdoky603@gmail.com") {
+  throw new Error("Owner email does not match the approved account.");
+}
 
 admin.initializeApp({
   credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+    projectId,
+    clientEmail,
+    privateKey: privateKey.replace(/\\n/g, "\n")
   })
 });
 
-const user = await admin.auth().getUserByEmail(email.trim());
-await admin.auth().setCustomUserClaims(user.uid, { admin: true });
-console.log(`Administrator role assigned to ${email}. Sign out and sign in again to refresh the token.`);
+const auth = admin.auth();
+const user = await auth.getUserByEmail(ownerEmail);
+
+const updatedClaims = {
+  ...user.customClaims,
+  admin: true,
+  owner: true
+};
+
+await auth.setCustomUserClaims(user.uid, updatedClaims);
+
+console.log("Owner access successfully assigned.");
+console.log("Sign out and sign in again to refresh permissions.");
+
 process.exit(0);

@@ -75,9 +75,8 @@ service cloud.firestore {
 
     // PRIVATE ANNOUNCEMENTS
     match /notices/{noticeId} {
-      allow read: if isApproved() || isAdmin();
-
-      allow create, update, delete: if isAdmin();
-    }
+  allow read: if isApproved() || isAdmin();
+  allow create, update, delete: if isAdmin();
+}
   }
 }

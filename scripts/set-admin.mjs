@@ -1,79 +1,51 @@
-
 import admin from "firebase-admin";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
+const projectId = process.env.FIREBASE_PROJECT_ID;
+const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+
+if (!projectId || !clientEmail || !privateKey) {
+  throw new Error("Firebase Admin credentials are not configured.");
+}
+
+if (projectId !== "thevictors") {
+  throw new Error("Wrong Firebase project. Expected thevictors.");
+}
+
 const rl = readline.createInterface({ input, output });
 
-try {
-  const email = (
-    await rl.question("Email of the existing Firebase user: ")
-  ).trim();
+const email = (
+  await rl.question("Enter the existing Firebase account email: ")
+).trim();
 
-  const role = (
-    await rl.question("Role to assign (admin or owner): ")
-  ).trim().toLowerCase();
+rl.close();
 
-  if (!email || !email.includes("@")) {
-    throw new Error("Enter a valid email address.");
-  }
-
-  if (!["admin", "owner"].includes(role)) {
-    throw new Error("Role must be admin or owner.");
-  }
-
-  const {
-    FIREBASE_PROJECT_ID,
-    FIREBASE_CLIENT_EMAIL,
-    FIREBASE_PRIVATE_KEY,
-  } = process.env;
-
-  if (
-    !FIREBASE_PROJECT_ID ||
-    !FIREBASE_CLIENT_EMAIL ||
-    !FIREBASE_PRIVATE_KEY
-  ) {
-    throw new Error(
-      "Firebase Admin environment variables are not configured."
-    );
-  }
-
-  if (!admin.apps.length) {
-    admin.initializeApp({
-      credential: admin.credential.cert({
-        projectId: FIREBASE_PROJECT_ID,
-        clientEmail: FIREBASE_CLIENT_EMAIL,
-        privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      }),
-    });
-  }
-
-  const auth = admin.auth();
-  const user = await auth.getUserByEmail(email);
-
-  // Preserve all existing custom claims.
-  const existingClaims = user.customClaims || {};
-  const updatedClaims = {
-    ...existingClaims,
-    admin: true,
-  };
-
-  if (role === "owner") {
-    updatedClaims.owner = true;
-  }
-
-  await auth.setCustomUserClaims(user.uid, updatedClaims);
-
-  console.log(
-    `Successfully assigned ${role} access to ${user.email}.`
-  );
-  console.log("The user must sign out and sign in again to refresh access.");
-} catch (error) {
-  console.error(
-    "Could not update the Firebase role:",
-    error instanceof Error ? error.message : error
-  );
-  process.exitCode = 1;
-} finally {
-  rl.close();
+if (!email.includes("@")) {
+  throw new Error("Please enter a valid email address.");
 }
+
+admin.initializeApp({
+  credential: admin.credential.cert({
+    projectId,
+    clientEmail,
+    privateKey: privateKey.replace(/\\n/g, "\n")
+  })
+});
+
+const auth = admin.auth();
+const user = await auth.getUserByEmail(email);
+
+const updatedClaims = {
+  ...user.customClaims,
+  admin: true,
+  owner: true
+};
+
+await auth.setCustomUserClaims(user.uid, updatedClaims);
+
+console.log(`Owner access successfully assigned to ${email}.`);
+console.log("Sign out and sign in again to refresh your permissions.");
+
+process.exit(0);

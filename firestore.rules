@@ -15,11 +15,15 @@ service cloud.firestore {
 
     function isApproved() {
       return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        )
         && get(
           /databases/$(database)/documents/users/$(request.auth.uid)
         ).data.status == "approved";
     }
 
+    // MEMBER PROFILES
     match /users/{uid} {
       allow read: if signedIn()
         && (request.auth.uid == uid || isAdmin());
@@ -41,6 +45,7 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // REGISTRATION APPROVAL QUEUE
     match /registrationQueue/{requestId} {
       allow create: if signedIn()
         && request.resource.data.uid == request.auth.uid
@@ -49,6 +54,7 @@ service cloud.firestore {
       allow read, update, delete: if isAdmin();
     }
 
+    // COMMUNITY POSTS
     match /posts/{postId} {
       allow read: if isApproved() || isAdmin();
 
@@ -67,8 +73,10 @@ service cloud.firestore {
         );
     }
 
+    // PRIVATE ANNOUNCEMENTS
     match /notices/{noticeId} {
-      allow read: if true;
+      allow read: if isApproved() || isAdmin();
+
       allow create, update, delete: if isAdmin();
     }
   }

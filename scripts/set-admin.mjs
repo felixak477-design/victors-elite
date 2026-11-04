@@ -14,7 +14,7 @@ if (projectId !== "thevictors") {
   throw new Error("Wrong Firebase project. Expected thevictors.");
 }
 
-if (ownerEmail !== "felixdoky603@gmail.com") {
+if (ownerEmail !== "felixdoly603@gmail.com") {
   throw new Error("Owner email does not match the approved account.");
 }
 

@@ -1,185 +1,421 @@
 
-import { NextRequest, NextResponse } from "next/server";
-import { FieldValue } from "firebase-admin/firestore";
-import { adminAuth, adminDb } from "@/lib/firebase-admin";
+"use client";
 
-export const runtime = "nodejs";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { onAuthStateChanged, type User } from "firebase/auth";
+import { auth, db } from "@/lib/firebase";
+import {
+  addDoc,
+  collection,
+  serverTimestamp,
+} from "firebase/firestore";
+import { useRouter } from "next/navigation";
 
-async function getAccess(request: NextRequest) {
-  const header = request.headers.get("authorization");
-  if (!header?.startsWith("Bearer ")) {
-    throw new Error("UNAUTHORIZED");
-  }
+type Member = {
+  uid: string;
+  email: string;
+  displayName: string;
+  disabled: boolean;
+  createdAt: string;
+  lastSignIn: string | null;
+  status: string;
+  role: string;
+  isOwner: boolean;
+};
 
-  const token = await adminAuth.verifyIdToken(header.slice(7), true);
-  if (token.admin !== true) {
-    throw new Error("FORBIDDEN");
-  }
+type Action =
+  | "approve"
+  | "decline"
+  | "suspend"
+  | "reactivate"
+  | "makeAdmin"
+  | "removeAdmin"
+  | "delete";
 
-  return {
-    uid: token.uid,
-    isOwner: token.owner === true,
-  };
-}
+export default function AdminPage() {
+  const router = useRouter();
 
-function errorResponse(error: unknown) {
-  const message = error instanceof Error ? error.message : "";
+  const [user, setUser] = useState<User | null>(null);
+  const [allowed, setAllowed] = useState(false);
+  const [owner, setOwner] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all");
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [notice, setNotice] = useState({
+    title: "",
+    body: "",
+    type: "Announcement",
+    date: "",
+  });
 
-  if (message === "UNAUTHORIZED") {
-    return NextResponse.json({ error: "Please sign in again." }, { status: 401 });
-  }
-
-  if (message === "FORBIDDEN") {
-    return NextResponse.json({ error: "Administrator access required." }, { status: 403 });
-  }
-
-  return NextResponse.json(
-    { error: "The request could not be completed." },
-    { status: 400 }
-  );
-}
-
-export async function GET(request: NextRequest) {
-  try {
-    await getAccess(request);
-
-    const result = await adminAuth.listUsers(1000);
-    const members = await Promise.all(
-      result.users.map(async (account) => {
-        const profile = await adminDb.collection("users").doc(account.uid).get();
-
-        return {
-          uid: account.uid,
-          email: account.email ?? "",
-          displayName: account.displayName ?? "",
-          disabled: account.disabled,
-          createdAt: account.metadata.creationTime,
-          lastSignIn: account.metadata.lastSignInTime ?? null,
-          status: profile.data()?.status ?? "unknown",
-          role: account.customClaims?.admin === true ? "admin" : "member",
-          isOwner: account.customClaims?.owner === true,
-        };
-      })
-    );
-
-    return NextResponse.json({
-      members,
-      hasMore: Boolean(result.pageToken),
+  const loadMembers = useCallback(async (current: User) => {
+    const token = await current.getIdToken();
+    const response = await fetch("/api/admin/members", {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
     });
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
 
-export async function POST(request: NextRequest) {
-  try {
-    const actor = await getAccess(request);
-    const body = await request.json();
+    const data = await response.json();
 
-    const uid = typeof body.uid === "string" ? body.uid : "";
-    const action = typeof body.action === "string" ? body.action : "";
-
-    if (!uid || uid.length > 128) {
-      return NextResponse.json({ error: "Invalid member ID." }, { status: 400 });
+    if (!response.ok) {
+      throw new Error(data.error || "Could not load members.");
     }
 
-    if (uid === actor.uid && ["delete", "suspend", "removeAdmin"].includes(action)) {
-      return NextResponse.json(
-        { error: "You cannot perform this action on your own account." },
-        { status: 400 }
-      );
+    setMembers(data.members || []);
+
+    if (data.hasMore) {
+      setMessage("Showing the first 1,000 accounts. More accounts are available.");
     }
+  }, []);
 
-    const account = await adminAuth.getUser(uid);
-    const profileRef = adminDb.collection("users").doc(uid);
-    const queue = adminDb.collection("registrationQueue");
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (current) => {
+      setUser(current);
 
-    if (account.customClaims?.owner === true && !actor.isOwner) {
-      return NextResponse.json({ error: "Only the owner can manage this account." }, { status: 403 });
-    }
-
-    if (action === "approve" || action === "decline") {
-      const status = action === "approve" ? "approved" : "declined";
-
-      await profileRef.set({ status }, { merge: true });
-
-      const requests = await queue.where("uid", "==", uid).get();
-      const batch = adminDb.batch();
-
-      requests.docs.forEach((item) => {
-        batch.update(item.ref, {
-          status,
-          reviewedAt: FieldValue.serverTimestamp(),
-        });
-      });
-
-      if (!requests.empty) await batch.commit();
-
-      return NextResponse.json({ success: true, status });
-    }
-
-    if (action === "suspend" || action === "reactivate") {
-      await adminAuth.updateUser(uid, {
-        disabled: action === "suspend",
-      });
-
-      return NextResponse.json({
-        success: true,
-        disabled: action === "suspend",
-      });
-    }
-
-    if (action === "makeAdmin" || action === "removeAdmin" || action === "delete") {
-      if (!actor.isOwner) {
-        return NextResponse.json(
-          { error: "Only the owner can manage administrator roles or delete accounts." },
-          { status: 403 }
-        );
+      if (!current) {
+        router.replace("/");
+        return;
       }
 
-      if (account.customClaims?.owner === true) {
-        return NextResponse.json(
-          { error: "The owner account cannot be changed here." },
-          { status: 400 }
-        );
-      }
+      try {
+        const token = await current.getIdTokenResult(true);
 
-      if (action === "makeAdmin" || action === "removeAdmin") {
-        const claims = { ...account.customClaims };
-
-        if (action === "makeAdmin") {
-          claims.admin = true;
-        } else {
-          delete claims.admin;
+        if (token.claims.admin !== true) {
+          setAllowed(false);
+          setMessage("This account does not have administrator access.");
+          setLoading(false);
+          return;
         }
 
-        await adminAuth.setCustomUserClaims(uid, claims);
-        await profileRef.set(
-          { role: action === "makeAdmin" ? "admin" : "member" },
-          { merge: true }
-        );
-
-        return NextResponse.json({
-          success: true,
-          role: action === "makeAdmin" ? "admin" : "member",
-        });
+        setOwner(token.claims.owner === true);
+        setAllowed(true);
+        await loadMembers(current);
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : "Access check failed.");
+      } finally {
+        setLoading(false);
       }
+    });
 
-      await adminAuth.deleteUser(uid);
+    return () => unsubscribe();
+  }, [router, loadMembers]);
 
-      const batch = adminDb.batch();
-      batch.delete(profileRef);
+  async function performAction(member: Member, action: Action) {
+    const labels: Record<Action, string> = {
+      approve: "approve this member",
+      decline: "decline this registration",
+      suspend: "suspend this account",
+      reactivate: "reactivate this account",
+      makeAdmin: "make this member an administrator",
+      removeAdmin: "remove administrator privileges",
+      delete: "permanently delete this account",
+    };
 
-      const requests = await queue.where("uid", "==", uid).get();
-      requests.docs.forEach((item) => batch.delete(item.ref));
-
-      await batch.commit();
-
-      return NextResponse.json({ success: true, deleted: true });
+    if (!window.confirm(`Are you sure you want to ${labels[action]}?`)) {
+      return;
     }
 
-    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
-  } catch (error) {
-    return errorResponse(error);
+    setBusy(member.uid);
+    setMessage("");
+
+    try {
+      if (!user) throw new Error("Please sign in again.");
+
+      const token = await user.getIdToken();
+      const response = await fetch("/api/admin/members", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ uid: member.uid, action }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || "Action failed.");
+      }
+
+      setMessage(`Success: ${labels[action]}.`);
+      await loadMembers(user);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Action failed.");
+    } finally {
+      setBusy("");
+    }
   }
+
+  async function publish(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!user) return;
+
+    setBusy("notice");
+    setMessage("");
+
+    try {
+      await addDoc(collection(db, "notices"), {
+        ...notice,
+        createdAt: serverTimestamp(),
+        createdBy: user.uid,
+      });
+
+      setNotice({
+        title: "",
+        body: "",
+        type: "Announcement",
+        date: "",
+      });
+
+      setMessage("Community update published successfully.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not publish update.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const visibleMembers = useMemo(() => {
+    const term = search.toLowerCase().trim();
+
+    return members.filter((member) => {
+      const matchesSearch =
+        member.displayName.toLowerCase().includes(term) ||
+        member.email.toLowerCase().includes(term);
+
+      const matchesFilter =
+        filter === "all" ||
+        (filter === "pending" && member.status === "pending") ||
+        (filter === "approved" && member.status === "approved") ||
+        (filter === "admins" && member.role === "admin") ||
+        (filter === "suspended" && member.disabled);
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [members, search, filter]);
+
+  const pendingCount = members.filter((m) => m.status === "pending").length;
+  const approvedCount = members.filter((m) => m.status === "approved").length;
+  const adminCount = members.filter((m) => m.role === "admin").length;
+
+  if (loading) {
+    return <main className="adminShell"><div className="panel">Checking administrator access…</div></main>;
+  }
+
+  if (!allowed) {
+    return (
+      <main className="adminShell">
+        <a href="/">← Back to THE VICTORS</a>
+        <div className="panel">
+          <h1>Administrator access</h1>
+          <p>{message || "Access denied."}</p>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="adminShell">
+      <header className="adminHeader">
+        <div>
+          <div className="eyebrow">THE VICTORS • CONTROL CENTRE</div>
+          <h1>Member Management</h1>
+          <p>Manage accounts, registrations and community updates.</p>
+        </div>
+        <a className="outlineDark" href="/">Back to website</a>
+      </header>
+
+      {message && (
+        <div className="panel" role="status" style={{ marginBottom: 18 }}>
+          {message}
+        </div>
+      )}
+
+      <section className="featureGrid" style={{ marginBottom: 20 }}>
+        <div className="feature">
+          <span>👥</span>
+          <h3>{members.length}</h3>
+          <p>Total accounts loaded</p>
+        </div>
+        <div className="feature">
+          <span>⏳</span>
+          <h3>{pendingCount}</h3>
+          <p>Pending registrations</p>
+        </div>
+        <div className="feature">
+          <span>✓</span>
+          <h3>{approvedCount}</h3>
+          <p>Approved members</p>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <h2>Member accounts</h2>
+          <button
+            className="primaryButton"
+            onClick={() => user && loadMembers(user).catch((e) => setMessage(e.message))}
+          >
+            Refresh list
+          </button>
+        </div>
+
+        <p className="muted">
+          {adminCount} administrator account(s). Search and filter the account list below.
+        </p>
+
+        <div className="adminForm" style={{ marginBottom: 18 }}>
+          <input
+            placeholder="Search by member name or email…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+
+          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
+            <option value="all">All accounts</option>
+            <option value="pending">Pending registrations</option>
+            <option value="approved">Approved members</option>
+            <option value="admins">Administrators</option>
+            <option value="suspended">Suspended accounts</option>
+          </select>
+        </div>
+
+        {visibleMembers.length === 0 ? (
+          <p className="muted">No matching accounts found.</p>
+        ) : (
+          visibleMembers.map((member) => (
+            <article className="request" key={member.uid}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <strong>{member.displayName || "Unnamed member"}</strong>
+                <small>{member.email || "No email address"}</small>
+                <small>
+                  Status: {member.status} · Role: {member.isOwner ? "Owner" : member.role}
+                  {member.disabled ? " · Suspended" : ""}
+                </small>
+                <small>Joined: {member.createdAt || "Unknown"}</small>
+              </div>
+
+              <div className="actions" style={{ flexWrap: "wrap" }}>
+                {member.status !== "approved" && (
+                  <button
+                    className="approve"
+                    disabled={busy === member.uid}
+                    onClick={() => performAction(member, "approve")}
+                  >
+                    Approve
+                  </button>
+                )}
+
+                {member.status === "pending" && (
+                  <button
+                    className="decline"
+                    disabled={busy === member.uid}
+                    onClick={() => performAction(member, "decline")}
+                  >
+                    Decline
+                  </button>
+                )}
+
+                {!member.disabled ? (
+                  <button
+                    className="decline"
+                    disabled={busy === member.uid || member.isOwner}
+                    onClick={() => performAction(member, "suspend")}
+                  >
+                    Suspend
+                  </button>
+                ) : (
+                  <button
+                    className="approve"
+                    disabled={busy === member.uid || member.isOwner}
+                    onClick={() => performAction(member, "reactivate")}
+                  >
+                    Reactivate
+                  </button>
+                )}
+
+                {owner && !member.isOwner && member.role !== "admin" && (
+                  <button
+                    className="approve"
+                    disabled={busy === member.uid}
+                    onClick={() => performAction(member, "makeAdmin")}
+                  >
+                    Make admin
+                  </button>
+                )}
+
+                {owner && !member.isOwner && member.role === "admin" && (
+                  <button
+                    className="decline"
+                    disabled={busy === member.uid}
+                    onClick={() => performAction(member, "removeAdmin")}
+                  >
+                    Remove admin
+                  </button>
+                )}
+
+                {owner && !member.isOwner && (
+                  <button
+                    className="decline"
+                    disabled={busy === member.uid}
+                    onClick={() => performAction(member, "delete")}
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
+            </article>
+          ))
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Publish a community update</h2>
+        <p className="muted">
+          Share announcements, exam reminders, activities and opportunities.
+        </p>
+
+        <form className="adminForm" onSubmit={publish}>
+          <input
+            required
+            maxLength={120}
+            placeholder="Update title"
+            value={notice.title}
+            onChange={(e) => setNotice({ ...notice, title: e.target.value })}
+          />
+
+          <select
+            value={notice.type}
+            onChange={(e) => setNotice({ ...notice, type: e.target.value })}
+          >
+            <option>Announcement</option>
+            <option>Exam reminder</option>
+            <option>Daily activity</option>
+            <option>Opportunity</option>
+          </select>
+
+          <input
+            type="date"
+            value={notice.date}
+            onChange={(e) => setNotice({ ...notice, date: e.target.value })}
+          />
+
+          <textarea
+            required
+            maxLength={4000}
+            placeholder="Write your update…"
+            value={notice.body}
+            onChange={(e) => setNotice({ ...notice, body: e.target.value })}
+          />
+
+          <button className="primaryButton" disabled={busy === "notice"}>
+            {busy === "notice" ? "Publishing…" : "Publish update"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
 }

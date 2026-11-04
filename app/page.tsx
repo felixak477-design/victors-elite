@@ -1,13 +1,14 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { onAuthStateChanged, signOut, type User } from "firebase/auth";
 import { auth, db } from "@/lib/firebase";
 import {
   collection,
   addDoc,
   doc,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -41,52 +42,78 @@ type Notice = {
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [posts, setPosts] = useState<Post[]>([]);
   const [notices, setNotices] = useState<Notice[]>([]);
   const [authMode, setAuthMode] = useState<"login" | "register">("register");
+
   const [form, setForm] = useState({
     name: "",
     email: "",
     password: ""
   });
+
   const [post, setPost] = useState({
     title: "",
     body: ""
   });
+
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => onAuthStateChanged(auth, async (current) => {
-    setUser(current);
+  useEffect(() => {
+    let active = true;
+    let requestVersion = 0;
 
-    if (!current) {
+    const unsubscribe = onAuthStateChanged(auth, async (current) => {
+      const version = ++requestVersion;
+
+      setAuthReady(false);
+      setUser(current);
       setProfile(null);
-      return;
-    }
 
-    try {
-      const token = await current.getIdTokenResult(true);
-      const { getDoc } = await import("firebase/firestore");
-      const snap = await getDoc(doc(db, "users", current.uid));
-
-      if (snap.exists()) {
-        setProfile({
-          ...snap.data(),
-          role: token.claims.admin === true ? "admin" : "member"
-        } as Profile);
-      } else {
-        setProfile(null);
+      if (!current) {
+        setAuthReady(true);
+        return;
       }
-    } catch {
-      setProfile(null);
-    }
-  }), []);
+
+      try {
+        const token = await current.getIdTokenResult(true);
+        const snap = await getDoc(doc(db, "users", current.uid));
+
+        if (!active || version !== requestVersion) return;
+
+        if (snap.exists()) {
+          setProfile({
+            ...snap.data(),
+            role: token.claims.admin === true ? "admin" : "member"
+          } as Profile);
+        } else {
+          setProfile(null);
+        }
+      } catch {
+        if (!active || version !== requestVersion) return;
+        setProfile(null);
+      } finally {
+        if (active && version === requestVersion) {
+          setAuthReady(true);
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const approved = profile?.status === "approved";
+  const admin = profile?.role === "admin";
+  const canAccessPrivateContent =
+    authReady && !!user && (approved || admin);
 
   useEffect(() => {
-    const admin = profile?.role === "admin";
-    const approved = profile?.status === "approved";
-
-    if (!user || (!approved && !admin)) {
+    if (!canAccessPrivateContent) {
       setPosts([]);
       return;
     }
@@ -98,17 +125,24 @@ export default function Home() {
 
     return onSnapshot(
       q,
-      snap => setPosts(
-        snap.docs.map(d => ({
-          id: d.id,
-          ...d.data()
-        } as Post))
-      ),
+      (snap) => {
+        setPosts(
+          snap.docs.map((d) => ({
+            id: d.id,
+            ...d.data()
+          } as Post))
+        );
+      },
       () => setPosts([])
     );
-  }, [user, profile?.status, profile?.role]);
+  }, [canAccessPrivateContent]);
 
   useEffect(() => {
+    if (!canAccessPrivateContent) {
+      setNotices([]);
+      return;
+    }
+
     const q = query(
       collection(db, "notices"),
       orderBy("createdAt", "desc")
@@ -116,16 +150,19 @@ export default function Home() {
 
     return onSnapshot(
       q,
-      snap => setNotices(
-        snap.docs.map(d => ({
-          id: d.id,
-          ...d.data()
-        } as Notice))
-      )
+      (snap) => {
+        setNotices(
+          snap.docs.map((d) => ({
+            id: d.id,
+            ...d.data()
+          } as Notice))
+        );
+      },
+      () => setNotices([])
     );
-  }, []);
+  }, [canAccessPrivateContent]);
 
-  async function submitAuth(e: React.FormEvent) {
+  async function submitAuth(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setBusy(true);
     setMessage("");
@@ -139,34 +176,34 @@ export default function Home() {
 
         const credential = await createUserWithEmailAndPassword(
           auth,
-          form.email,
+          form.email.trim(),
           form.password
         );
 
         await updateProfile(credential.user, {
-          displayName: form.name
+          displayName: form.name.trim()
         });
 
         await setDoc(doc(db, "users", credential.user.uid), {
-          displayName: form.name,
-          email: form.email,
-          status: "pending",
-          role: "member"
-        });
-
-        setProfile({
-          displayName: form.name,
-          email: form.email,
+          displayName: form.name.trim(),
+          email: form.email.trim(),
           status: "pending",
           role: "member"
         });
 
         await addDoc(collection(db, "registrationQueue"), {
           uid: credential.user.uid,
-          displayName: form.name,
-          email: form.email,
+          displayName: form.name.trim(),
+          email: form.email.trim(),
           status: "pending",
           createdAt: serverTimestamp()
+        });
+
+        setProfile({
+          displayName: form.name.trim(),
+          email: form.email.trim(),
+          status: "pending",
+          role: "member"
         });
 
         setMessage(
@@ -178,11 +215,11 @@ export default function Home() {
 
         await signInWithEmailAndPassword(
           auth,
-          form.email,
+          form.email.trim(),
           form.password
         );
 
-        setMessage("Signed in. Loading your member status…");
+        setMessage("Signed in. Checking your membership status…");
       }
     } catch (err) {
       setMessage(
@@ -193,13 +230,10 @@ export default function Home() {
     }
   }
 
-  async function publishPost(e: React.FormEvent) {
+  async function publishPost(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
-    const approved = profile?.status === "approved";
-    const admin = profile?.role === "admin";
-
-    if (!user || (!approved && !admin)) {
+    if (!user || !canAccessPrivateContent) {
       setMessage("You do not have permission to publish.");
       return;
     }
@@ -212,29 +246,20 @@ export default function Home() {
         title: post.title.trim(),
         body: post.body.trim(),
         authorUid: user.uid,
-        authorName: profile.displayName,
+        authorName: profile?.displayName || "Member",
         createdAt: serverTimestamp()
       });
 
-      setPost({
-        title: "",
-        body: ""
-      });
-
+      setPost({ title: "", body: "" });
       setMessage("Your post has been published.");
     } catch (err) {
       setMessage(
-        err instanceof Error
-          ? err.message
-          : "Could not publish post."
+        err instanceof Error ? err.message : "Could not publish post."
       );
     } finally {
       setBusy(false);
     }
   }
-
-  const approved = profile?.status === "approved";
-  const admin = profile?.role === "admin";
 
   return (
     <main>
@@ -249,8 +274,11 @@ export default function Home() {
 
         <nav>
           <a href="#features">What we do</a>
-          <a href="#community">Community</a>
+          {canAccessPrivateContent && (
+            <a href="#community">Community</a>
+          )}
           {admin && <a href="/admin">Admin</a>}
+
           {user ? (
             <button
               className="smallButton"
@@ -327,37 +355,19 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="section community" id="community">
-        <div className="sectionHead">
-          <div>
-            <div className="eyebrow">THE MEMBERS' SPACE</div>
-            <h2>Community board.</h2>
+      {canAccessPrivateContent && (
+        <section className="section community" id="community">
+          <div className="sectionHead">
+            <div>
+              <div className="eyebrow">THE MEMBERS' SPACE</div>
+              <h2>Community board.</h2>
+            </div>
+            <p>
+              Welcome to the private THE VICTORS members' area.
+            </p>
           </div>
-          <p>
-            Sign in with an approved account or administrator
-            access to participate.
-          </p>
-        </div>
 
-        {user && profile?.status === "pending" && !admin && (
-          <div className="notice">
-            Your registration is awaiting approval. You can
-            access member features once an administrator approves it.
-          </div>
-        )}
-
-        {user && profile?.status === "declined" && !admin && (
-          <div className="notice warning">
-            Your registration was not approved. Contact a
-            community administrator for help.
-          </div>
-        )}
-
-        {(approved || admin) && (
-          <form
-            className="panel postForm"
-            onSubmit={publishPost}
-          >
+          <form className="panel postForm" onSubmit={publishPost}>
             <h3>Create a post</h3>
 
             <input
@@ -365,7 +375,7 @@ export default function Home() {
               maxLength={100}
               placeholder="Post title"
               value={post.title}
-              onChange={e =>
+              onChange={(e) =>
                 setPost({ ...post, title: e.target.value })
               }
             />
@@ -375,66 +385,63 @@ export default function Home() {
               maxLength={3000}
               placeholder="Share a question, homework or idea…"
               value={post.body}
-              onChange={e =>
+              onChange={(e) =>
                 setPost({ ...post, body: e.target.value })
               }
             />
 
-            <button
-              className="primaryButton"
-              disabled={busy}
-            >
+            <button className="primaryButton" disabled={busy}>
               {busy ? "Publishing…" : "Publish post"}
             </button>
           </form>
-        )}
 
-        <div className="postList">
-          {posts.map(item => (
-            <article className="panel post" key={item.id}>
-              <div className="postMeta">
-                {item.authorName || "Member"} ·{" "}
-                {item.createdAt?.toDate?.().toLocaleString() || "Just now"}
+          <div className="postList">
+            {posts.map((item) => (
+              <article className="panel post" key={item.id}>
+                <div className="postMeta">
+                  {item.authorName || "Member"} ·{" "}
+                  {item.createdAt?.toDate?.().toLocaleString() || "Just now"}
+                </div>
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </article>
+            ))}
+
+            {posts.length === 0 && (
+              <div className="panel muted">
+                No posts yet. Be the first to start a useful discussion.
               </div>
-              <h3>{item.title}</h3>
-              <p>{item.body}</p>
-            </article>
-          ))}
-
-          {posts.length === 0 && (
-            <div className="panel muted">
-              No posts yet. Be the first to start a useful discussion.
-            </div>
-          )}
-        </div>
-
-        <div className="sectionHead noticeHead">
-          <div>
-            <div className="eyebrow">KEEP UP TO DATE</div>
-            <h2>Announcements & activities.</h2>
+            )}
           </div>
-        </div>
 
-        <div className="noticeGrid">
-          {notices.map(n => (
-            <article className="panel" key={n.id}>
-              <span className="tag">
-                {n.type || "ANNOUNCEMENT"}
-              </span>
-              <h3>{n.title}</h3>
-              <p>{n.body}</p>
-              {n.date && <small>{n.date}</small>}
-            </article>
-          ))}
-
-          {notices.length === 0 && (
-            <div className="panel muted">
-              New announcements, exam reminders and activities
-              will appear here.
+          <div className="sectionHead noticeHead">
+            <div>
+              <div className="eyebrow">KEEP UP TO DATE</div>
+              <h2>Announcements & activities.</h2>
             </div>
-          )}
-        </div>
-      </section>
+          </div>
+
+          <div className="noticeGrid">
+            {notices.map((n) => (
+              <article className="panel" key={n.id}>
+                <span className="tag">
+                  {n.type || "ANNOUNCEMENT"}
+                </span>
+                <h3>{n.title}</h3>
+                <p>{n.body}</p>
+                {n.date && <small>{n.date}</small>}
+              </article>
+            ))}
+
+            {notices.length === 0 && (
+              <div className="panel muted">
+                New announcements, exam reminders and activities
+                will appear here.
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       <section className="section account" id="account">
         <div className="accountCard">
@@ -451,11 +458,17 @@ export default function Home() {
           {user ? (
             <>
               <p>
-                {admin
-                  ? "You have administrator access. Welcome to THE VICTORS."
-                  : approved
-                    ? "Your membership is active. Take part in the community."
-                    : "Your account is created. Membership access depends on administrator approval."}
+                {!authReady
+                  ? "Checking your membership status…"
+                  : admin
+                    ? "You have administrator access. Welcome to THE VICTORS."
+                    : approved
+                      ? "Your membership is active. Take part in the community."
+                      : profile?.status === "declined"
+                        ? "Your registration was not approved. Contact a community administrator for help."
+                        : profile?.status === "pending"
+                          ? "Your registration is awaiting approval. Member access will open after approval."
+                          : "We could not verify your membership profile. Please contact an administrator."}
               </p>
 
               {admin && (
@@ -463,11 +476,18 @@ export default function Home() {
                   Open admin dashboard ↗
                 </a>
               )}
+
+              {canAccessPrivateContent && (
+                <a className="outlineButton" href="#community">
+                  Open members' area
+                </a>
+              )}
             </>
           ) : (
             <>
               <div className="tabs">
                 <button
+                  type="button"
                   className={authMode === "register" ? "selected" : ""}
                   onClick={() => setAuthMode("register")}
                 >
@@ -475,6 +495,7 @@ export default function Home() {
                 </button>
 
                 <button
+                  type="button"
                   className={authMode === "login" ? "selected" : ""}
                   onClick={() => setAuthMode("login")}
                 >
@@ -490,7 +511,7 @@ export default function Home() {
                     maxLength={70}
                     placeholder="Full name"
                     value={form.name}
-                    onChange={e =>
+                    onChange={(e) =>
                       setForm({ ...form, name: e.target.value })
                     }
                   />
@@ -501,7 +522,7 @@ export default function Home() {
                   type="email"
                   placeholder="Email address"
                   value={form.email}
-                  onChange={e =>
+                  onChange={(e) =>
                     setForm({ ...form, email: e.target.value })
                   }
                 />
@@ -512,15 +533,12 @@ export default function Home() {
                   type="password"
                   placeholder="Password (at least 8 characters)"
                   value={form.password}
-                  onChange={e =>
+                  onChange={(e) =>
                     setForm({ ...form, password: e.target.value })
                   }
                 />
 
-                <button
-                  className="primaryButton"
-                  disabled={busy}
-                >
+                <button className="primaryButton" disabled={busy}>
                   {busy
                     ? "Please wait…"
                     : authMode === "register"
